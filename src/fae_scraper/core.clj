@@ -80,17 +80,23 @@
 (defn fae-extract-page-image-links
   "extracts the links from the hickory page structure"
   [fae-page]
-  (let [fae-contents (-> (s/select (s/child
-                     (s/id "main")
-                     (s/class "layout")
-                     (s/tag :article)
-                     (s/tag :div) ;; TODO some entries don't have links because the real picture is no bigger... need a separate routine for those.
-                     (s/tag :a))
-                    fae-page))]
-    (vec(map #(assoc
-                (:attrs %)
-                :desc (:alt (:attrs (first (:content %)))))
-             fae-contents))))
+  (let [fae-contents (s/select
+                      (s/child
+                       (s/id "main")
+                       (s/class "layout")
+                       (s/tag :article)
+                       (s/tag :div))
+                      fae-page)]
+    (mapv #(let [x %
+                 href (-> (s/select (s/child (s/tag :a)) x) first :attrs :href)
+                 desc (-> (s/select (s/child (s/tag :a)) x) first :content first :attrs :alt)]
+             (if
+               (not (nil? desc))
+               {:href href :desc desc :iframe false}
+               (let [href (-> (s/select (s/child (s/tag :iframe)) x) first :attrs :src)
+                     desc (str "by " (-> (s/select (s/child (s/tag :a)) x) first :content first))]
+                 {:href href :desc desc :iframe true})))
+              fae-contents)))
 
 ;;
 (defn fae-get-image-from-image-page
@@ -101,12 +107,35 @@
                     page))]
              (:data-src (:attrs (first contents)))))
 
+;;
+(defn fae-get-images-from-iframe-page
+  "extracts the pictures from a fae iframe page"
+  [page]
+  (let [contents (s/select
+                  (s/child
+                   (s/class :photoset)
+                   (s/tag :div)
+                   (s/tag :a))
+                  page)]
+             (mapv #(:href (:attrs %)) contents)))
+
+;;
 (defn fae-full-scrape-page
   "scrapes a given page"
-  [pageNum]
-  (let [fae-stage-one-result (fae-extract-page-image-links (fae-get-list-page fae-base-url pageNum))]
-    (map #(dissoc (assoc % :src (fae-get-image-from-image-page (get-page-as-hickory (:href %)))) :href) fae-stage-one-result)))
+  [page-num]
+  (let [fae-stage-one-result (fae-extract-page-image-links (fae-get-list-page fae-base-url page-num))
+      normal-links (filter #(not (:iframe %)) fae-stage-one-result)
+      iframe-links (filter #(:iframe %) fae-stage-one-result)
+      data (flatten
+               (conj
+                 (map #(dissoc (assoc % :src (fae-get-image-from-image-page   (get-page-as-hickory (:href %)))) :href) normal-links)
+                 (map #(dissoc (assoc % :src (fae-get-images-from-iframe-page (get-page-as-hickory (:href %)))) :href) iframe-links)))]
+  (reduce
+   (fn [v n] (if (:iframe n)
+               (into v (map #(hash-map :src % :desc (:desc n)) (:src n)))
+               (into v [(dissoc n :iframe)]))) [] data)))
 
+;;
 (defn process
   "takes a fae scrape output and stores/rejects it"
   [fae-map mg-db]
@@ -134,8 +163,18 @@
       (println title "is starting...")
 
       (if full?
+        ;; back-in-time scrape
         (do
-          (println "Performing a FULL scrape. This will take a while...")))
+          (println "Performing a FULL scrape. This will take a while...")
+          (let [last-result (atom '(1))
+                page-count (atom 0)]
+            (while (not (empty? @last-result))
+              (do
+                (swap! page-count inc)
+                (println "Checking page" @page-count)
+                (reset! last-result (fae-full-scrape-page @page-count))
+                (process @last-result mg-db))))
+          (println "Full scrape has completed! Resuming polling...")))
 
       ;; periodic scrape of page 1
       (every delay #(process (fae-full-scrape-page 1) mg-db) my-pool :fixed-delay true :initial-delay 0))))

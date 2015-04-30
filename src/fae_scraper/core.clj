@@ -13,13 +13,17 @@
 (def title "Fantasy Art Engine Scraper")                           ;; title of the app
 (def my-pool (mk-pool))                                            ;; thread pool for at-at
 (def fae-base-url "http://fantasy-art-engine.tumblr.com/page/%d")  ;; defines the url we use to extract the starting html
-(def db-name "fae")
-(def db-tbl "images")
+(def db-name "images")
+(def db-tbl "fae")
 
 (def cli-options
   ;; An option with a required argument
   [["-f" "--full" "Performs a full 'back in time' scrape before polling. Takes a long time."
     :default false]
+   ["-p" "--page PAGENUM" "Specifies which page to poll."
+    :default 1
+    :parse-fn #(Integer/parseInt %)
+    :validate [#(> % 0) "Must be a number greater than 0"]]
    ["-d" "--delay MILLISECONDS" "Millisecond delay between polls"
     :default 3600000 ;; default is 1 hr
     :parse-fn #(Integer/parseInt %)
@@ -90,12 +94,19 @@
     (mapv #(let [x %
                  href (-> (s/select (s/child (s/tag :a)) x) first :attrs :href)
                  desc (-> (s/select (s/child (s/tag :a)) x) first :content first :attrs :alt)]
-             (if
+             (if ;; if no desc then we're abnormal
                (not (nil? desc))
                {:href href :desc desc :iframe false}
                (let [href (-> (s/select (s/child (s/tag :iframe)) x) first :attrs :src)
                      desc (str "by " (-> (s/select (s/child (s/tag :a)) x) first :content first))]
-                 {:href href :desc desc :iframe true})))
+                 (if ;; if no href then we're not a link, else we're an iframe
+                   (not (nil? href))
+                   {:href href
+                    :desc (str (-> (s/select (s/child (s/tag :p)) x) first :content first :content first) " " desc)
+                    :iframe true}
+                   {:href (-> (s/select (s/child (s/tag :div)) x) first :content second :attrs :src)
+                    :desc (-> (s/select (s/child (s/tag :div)) x) first :content second :attrs :alt)
+                    :iframe false})))) ;; we're just an img
               fae-contents)))
 
 ;;
@@ -120,16 +131,23 @@
              (mapv #(:href (:attrs %)) contents)))
 
 ;;
+(defn- lazy-contains? [coll key]
+  (boolean (some #(= % key) coll)))
+
+;;
 (defn fae-full-scrape-page
   "scrapes a given page"
   [page-num]
   (let [fae-stage-one-result (fae-extract-page-image-links (fae-get-list-page fae-base-url page-num))
-      normal-links (filter #(not (:iframe %)) fae-stage-one-result)
-      iframe-links (filter #(:iframe %) fae-stage-one-result)
-      data (flatten
-               (conj
-                 (map #(dissoc (assoc % :src (fae-get-image-from-image-page   (get-page-as-hickory (:href %)))) :href) normal-links)
-                 (map #(dissoc (assoc % :src (fae-get-images-from-iframe-page (get-page-as-hickory (:href %)))) :href) iframe-links)))]
+        normal-links (filter #(not (:iframe %)) fae-stage-one-result)
+        iframe-links (filter #(:iframe %) fae-stage-one-result)
+        not-links    (filter #(.endsWith (:href %) ".jpg") normal-links)
+        normal-links (filter #(not (lazy-contains? not-links %)) normal-links)
+        data (flatten
+              (conj
+               (map #(dissoc (assoc % :src (fae-get-image-from-image-page   (get-page-as-hickory (:href %)))) :href) normal-links)
+               (map #(dissoc (assoc % :src (fae-get-images-from-iframe-page (get-page-as-hickory (:href %)))) :href) iframe-links)
+               (map #(dissoc (assoc % :src (:href %)) :href) not-links)))]
   (reduce
    (fn [v n] (if (:iframe n)
                (into v (map #(hash-map :src % :desc (:desc n)) (:src n)))
@@ -152,6 +170,7 @@
   (let [{:keys [options arguments errors summary]} (parse-opts args cli-options)
         full? (:full options)
         delay (:delay options)
+        page-num (:page options)
         mg-conn (mg/connect)
         mg-db (mg/get-db mg-conn db-name)]
     (do
@@ -177,6 +196,6 @@
           (println "Full scrape has completed! Resuming polling...")))
 
       ;; periodic scrape of page 1
-      (every delay #(process (fae-full-scrape-page 1) mg-db) my-pool :fixed-delay true :initial-delay 0))))
+      (every delay #(process (fae-full-scrape-page page-num) mg-db) my-pool :fixed-delay true :initial-delay 0))))
 
 

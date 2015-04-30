@@ -35,7 +35,7 @@
   (->> [title
         ""
         "Usage: fae-scraper [options]"
-        "       Default behaviour is to periodically poll thw FAE website for new art and add it to DB"
+        "       Default behaviour is to periodically poll the FAE website for new art and add it to DB"
         ""
         "Options:"
         options-summary]

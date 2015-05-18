@@ -160,7 +160,7 @@
   (doseq [f fae-map]
     (if (not (image-exists? mg-db f))
       (do
-        (add-image! mg-db f)
+        (add-image! mg-db (conj f {:scraped-date (java.util.Date.)}))
         (println (java.util.Date.) "Added" (:desc f) "...")))))
 
 
